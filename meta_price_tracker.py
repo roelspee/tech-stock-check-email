@@ -1,41 +1,39 @@
 """
-META (Facebook) Stock Price Tracker — AI Agent
-================================================
-Monitors Meta's stock price. When it drops below your target:
-  1. Fetches recent META news from NewsAPI
-  2. Asks Claude to reason about why the price dropped
-  3. Sends you a smart email with analysis, not just a price alert
+META (Facebook) Stock Price Tracker — AI Agent (Railway Cron Job)
+==================================================================
+Runs once per invocation — designed to be triggered by Railway's
+built-in Cron Job service on a schedule like: 0 7 * * *  (8am CET)
 
-Requirements:
-    pip install -r requirements.txt
+On each run:
+  1. Fetches META's current stock price
+  2. If below target: fetches news, asks Claude for analysis, sends email
+  3. Exits
 
 Environment variables to set in Railway:
     EMAIL_SENDER, EMAIL_RECEIVER
+    SENDGRID_API_KEY
     ANTHROPIC_API_KEY
     NEWS_API_KEY
 """
 
 import yfinance as yf
-import time
 import os
+import sys
 import requests
 import anthropic
 from datetime import datetime
 from typing import Optional
-import pytz
 
 
 # ─────────────────────────────────────────────
 #  CONFIG
 # ─────────────────────────────────────────────
 
-TICKER                 = "META"
-ALERT_BELOW            = 690.00
-RUN_HOUR_CET           = 8  # Run every day at 8am CET
-LOG_FILE               = "meta_price_log.csv"
-ALERT_COOLDOWN_SECONDS = 3600   # 1 hour between emails
+TICKER       = "META"
+ALERT_BELOW  = 690.00
+LOG_FILE     = "meta_price_log.csv"   # Set to None to disable
 
-# --- Credentials (set these as Railway environment variables) ---
+# --- Credentials (Railway environment variables) ---
 EMAIL_SENDER      = os.environ.get("EMAIL_SENDER",      "you@gmail.com")
 EMAIL_RECEIVER    = os.environ.get("EMAIL_RECEIVER",    "you@gmail.com")
 SENDGRID_API_KEY  = os.environ.get("SENDGRID_API_KEY",  "")
@@ -52,12 +50,12 @@ def get_price(ticker: str) -> Optional[float]:
         price = stock.fast_info.last_price
         return round(price, 2)
     except Exception as e:
-        print(f"  [ERROR] Could not fetch price: {e}")
+        print(f"[ERROR] Could not fetch price: {e}")
         return None
 
 
 def get_news(query: str, num_articles: int = 5) -> list:
-    """Fetch recent news headlines for a query using NewsAPI."""
+    """Fetch recent news headlines using NewsAPI."""
     try:
         url = "https://newsapi.org/v2/everything"
         params = {
@@ -71,22 +69,22 @@ def get_news(query: str, num_articles: int = 5) -> list:
         data = response.json()
 
         if data.get("status") != "ok":
-            print(f"  [WARN] NewsAPI error: {data.get('message')}")
+            print(f"[WARN] NewsAPI error: {data.get('message')}")
             return []
 
-        articles = []
-        for a in data.get("articles", []):
-            articles.append({
+        return [
+            {
                 "title":       a.get("title", ""),
                 "description": a.get("description", ""),
                 "source":      a.get("source", {}).get("name", ""),
-                "publishedAt": a.get("publishedAt", ""),
+                "publishedAt": a.get("publishedAt", "")[:10],
                 "url":         a.get("url", ""),
-            })
-        return articles
+            }
+            for a in data.get("articles", [])
+        ]
 
     except Exception as e:
-        print(f"  [ERROR] Could not fetch news: {e}")
+        print(f"[ERROR] Could not fetch news: {e}")
         return []
 
 
@@ -95,41 +93,37 @@ def analyze_with_claude(price: float, target: float, articles: list) -> str:
     try:
         client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 
-        if articles:
-            news_text = "\n".join([
-                f"- [{a['source']}] {a['title']}: {a['description']}"
-                for a in articles
-            ])
-        else:
-            news_text = "No recent news articles found."
+        news_text = "\n".join([
+            f"- [{a['source']}] {a['title']}: {a['description']}"
+            for a in articles
+        ]) if articles else "No recent news articles found."
 
-        prompt = f"""You are a financial analyst assistant. META's stock price has just dropped below a user's alert threshold.
+        prompt = f"""You are a financial analyst assistant. META's stock price has dropped below a user's alert threshold.
 
 Price data:
 - Current price: ${price:.2f}
 - Alert threshold: ${target:.2f}
-- Drop below threshold: ${target - price:.2f} ({((target - price) / target * 100):.2f}%)
+- Drop: ${target - price:.2f} ({((target - price) / target * 100):.2f}%)
 
-Recent META news headlines:
+Recent META news:
 {news_text}
 
-Please provide a brief, clear analysis (3-5 sentences) covering:
-1. What might be causing this price drop based on the news
-2. Whether this looks like a short-term dip or something more significant
-3. What the investor should keep an eye on
+Provide a brief analysis (3-5 sentences):
+1. Likely cause of the drop based on the news
+2. Short-term dip or something more significant?
+3. What to watch next
 
-Be direct and practical. Do not give explicit buy/sell advice."""
+Be direct and practical. No explicit buy/sell advice."""
 
         message = client.messages.create(
             model="claude-sonnet-4-6",
             max_tokens=400,
             messages=[{"role": "user", "content": prompt}]
         )
-
         return message.content[0].text
 
     except Exception as e:
-        print(f"  [ERROR] Claude analysis failed: {e}")
+        print(f"[ERROR] Claude analysis failed: {e}")
         return "AI analysis unavailable at this time."
 
 
@@ -139,22 +133,19 @@ def build_html_email(price: float, target: float, analysis: str, articles: list)
     drop_usd  = target - price
     drop_pct  = (drop_usd / target) * 100
 
-    # Build news rows
     news_rows = ""
     for a in articles[:4]:
-        pub = a.get("publishedAt", "")[:10]  # just the date
         news_rows += f"""
         <tr>
           <td style="padding:10px 0; border-bottom:1px solid #f0f0f0;">
             <a href="{a['url']}" style="color:#1877f2; text-decoration:none; font-weight:600; font-size:14px;">{a['title']}</a>
-            <div style="color:#888; font-size:12px; margin-top:3px;">{a['source']} &nbsp;·&nbsp; {pub}</div>
+            <div style="color:#888; font-size:12px; margin-top:3px;">{a['source']} &nbsp;·&nbsp; {a['publishedAt']}</div>
           </td>
         </tr>"""
 
     if not news_rows:
         news_rows = "<tr><td style='padding:10px 0; color:#888; font-size:14px;'>No recent news found.</td></tr>"
 
-    # Paragraph-ify the analysis
     analysis_html = "".join(
         f"<p style='margin:0 0 10px 0;'>{p.strip()}</p>"
         for p in analysis.split("\n") if p.strip()
@@ -202,9 +193,7 @@ def build_html_email(price: float, target: float, analysis: str, articles: list)
           <tr>
             <td style="padding:24px 32px 0;">
               <div style="font-size:11px; font-weight:700; letter-spacing:1px; text-transform:uppercase; color:#888; margin-bottom:10px;">AI Analysis</div>
-              <div style="font-size:14px; line-height:1.7; color:#333;">
-                {analysis_html}
-              </div>
+              <div style="font-size:14px; line-height:1.7; color:#333;">{analysis_html}</div>
             </td>
           </tr>
 
@@ -212,16 +201,14 @@ def build_html_email(price: float, target: float, analysis: str, articles: list)
           <tr>
             <td style="padding:24px 32px 0;">
               <div style="font-size:11px; font-weight:700; letter-spacing:1px; text-transform:uppercase; color:#888; margin-bottom:6px;">Recent News</div>
-              <table width="100%" cellpadding="0" cellspacing="0">
-                {news_rows}
-              </table>
+              <table width="100%" cellpadding="0" cellspacing="0">{news_rows}</table>
             </td>
           </tr>
 
           <!-- Footer -->
           <tr>
             <td style="padding:24px 32px 32px; color:#aaa; font-size:12px; border-top:1px solid #f0f0f0; margin-top:24px;">
-              Automated alert · Next email in {ALERT_COOLDOWN_SECONDS // 60} min if price stays below target
+              Automated alert · Runs daily at 08:00 CET via Railway Cron
             </td>
           </tr>
 
@@ -235,8 +222,8 @@ def build_html_email(price: float, target: float, analysis: str, articles: list)
     return subject, html
 
 
-def send_smart_email(price: float, target: float, analysis: str, articles: list):
-    """Send a smart HTML email with AI analysis and news."""
+def send_smart_email(price: float, target: float, analysis: str, articles: list) -> bool:
+    """Send HTML alert email via SendGrid."""
     subject, html_body = build_html_email(price, target, analysis, articles)
 
     try:
@@ -256,14 +243,14 @@ def send_smart_email(price: float, target: float, analysis: str, articles: list)
         )
 
         if response.status_code == 202:
-            print(f"  📧 Smart alert email sent to {EMAIL_RECEIVER}")
+            print(f"📧 Alert email sent to {EMAIL_RECEIVER}")
             return True
         else:
-            print(f"  [ERROR] SendGrid error {response.status_code}: {response.text}")
+            print(f"[ERROR] SendGrid error {response.status_code}: {response.text}")
             return False
 
     except Exception as e:
-        print(f"  [ERROR] Failed to send email: {e}")
+        print(f"[ERROR] Failed to send email: {e}")
         return False
 
 
@@ -280,79 +267,37 @@ def log_price(price: float):
         f.write(f"{timestamp},{TICKER},{price},{below}\n")
 
 
-def format_change(price: float, prev_price: Optional[float]) -> str:
-    if prev_price is None:
-        return ""
-    change = price - prev_price
-    pct = (change / prev_price) * 100
-    arrow = "▲" if change >= 0 else "▼"
-    return f"  {arrow} ${abs(change):.2f} ({abs(pct):.2f}%)"
+def main():
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    print(f"[{timestamp}] META Price Tracker — starting run")
 
+    price = get_price(TICKER)
 
-def run():
-    print("=" * 54)
-    print(f"  META Stock Price Tracker — AI Agent Mode")
-    print(f"  Watching  : {TICKER}")
-    print(f"  Alert if  : price drops BELOW ${ALERT_BELOW:.2f}")
-    print(f"  Runs at   : {RUN_HOUR_CET}:00 CET every day")
-    print(f"  Email to  : {EMAIL_RECEIVER}")
-    print(f"  Cooldown  : {ALERT_COOLDOWN_SECONDS // 60} min between emails")
-    print(f"  AI model  : claude-sonnet-4-6")
-    if LOG_FILE:
-        print(f"  Log file  : {LOG_FILE}")
-    print("=" * 54)
-    print("  Press Ctrl+C to stop.\n")
+    if price is None:
+        print("[ERROR] Could not retrieve price. Exiting.")
+        sys.exit(1)
 
-    prev_price = None
+    status = "🔴 BELOW TARGET" if price < ALERT_BELOW else "✅ above target"
+    print(f"[{timestamp}] {TICKER}: ${price:.2f}  —  {status}")
 
-    def seconds_until_next_run():
-        """Calculate seconds until next 8am CET."""
-        cet = pytz.timezone("Europe/Amsterdam")
-        now_cet = datetime.now(cet)
-        next_run = now_cet.replace(hour=RUN_HOUR_CET, minute=0, second=0, microsecond=0)
-        if now_cet >= next_run:
-            next_run = next_run.replace(day=next_run.day + 1)
-        delta = (next_run - now_cet).total_seconds()
-        return int(delta), next_run.strftime("%Y-%m-%d %H:%M:%S %Z")
+    log_price(price)
 
-    while True:
-        secs, next_run_str = seconds_until_next_run()
-        print(f"  ⏰ Next check at {next_run_str} (in {secs // 3600}h {(secs % 3600) // 60}m)")
-        try:
-            time.sleep(secs)
-        except KeyboardInterrupt:
-            print(f"\nStopped. Goodbye!")
-            break
+    if price < ALERT_BELOW:
+        print("⚠️  Triggered! Fetching news and running AI analysis...")
 
-        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        price = get_price(TICKER)
+        articles = get_news("META Facebook stock")
+        print(f"📰 Found {len(articles)} news articles")
 
-        if price is not None:
-            change_str = format_change(price, prev_price)
-            status = "🔴 BELOW TARGET" if price < ALERT_BELOW else "✅ above target"
-            print(f"[{timestamp}]  {TICKER}: ${price:.2f}{change_str}  —  {status}")
+        print("🤖 Asking Claude for analysis...")
+        analysis = analyze_with_claude(price, ALERT_BELOW, articles)
+        print("✅ Analysis complete")
 
-            log_price(price)
+        send_smart_email(price, ALERT_BELOW, analysis, articles)
+    else:
+        print("✅ Price above target — no alert needed.")
 
-            if price < ALERT_BELOW:
-                print(f"  ⚠️  Triggered! Fetching news and running AI analysis...")
-
-                articles = get_news("META Facebook stock")
-                print(f"  📰 Found {len(articles)} news articles")
-
-                print(f"  🤖 Asking Claude for analysis...")
-                analysis = analyze_with_claude(price, ALERT_BELOW, articles)
-                print(f"  ✅ Analysis complete")
-
-                send_smart_email(price, ALERT_BELOW, analysis, articles)
-            else:
-                print(f"  ✅ Price above target — no alert needed today.")
-
-            prev_price = price
-
-        else:
-            print(f"[{timestamp}]  Could not retrieve price.")
+    print("Run complete. Exiting.")
 
 
 if __name__ == "__main__":
-    run()
+    main()
