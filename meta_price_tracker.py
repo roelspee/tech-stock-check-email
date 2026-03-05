@@ -1,15 +1,15 @@
 """
-META (Facebook) Stock Price Tracker — AI Agent (Railway Cron Job)
-==================================================================
-Runs once per invocation — designed to be triggered by Railway's
-built-in Cron Job service on a schedule like: 0 7 * * *  (8am CET)
+Tech Stock Price Tracker — AI Agent (Railway Cron Job)
+=======================================================
+Runs once per invocation — triggered by Railway's Cron Job service.
+Recommended schedule: 0 7 * * *  (8am CET / UTC+1)
 
-On each run:
-  1. Fetches META's current stock price
-  2. If below target: fetches news, asks Claude for analysis, sends email
+On each run, for every stock in WATCHLIST:
+  1. Fetches current price
+  2. If below alert threshold: fetches news, runs Claude analysis, sends email
   3. Exits
 
-Environment variables to set in Railway:
+Environment variables (set in Railway):
     EMAIL_SENDER, EMAIL_RECEIVER
     SENDGRID_API_KEY
     ANTHROPIC_API_KEY
@@ -26,12 +26,21 @@ from typing import Optional
 
 
 # ─────────────────────────────────────────────
-#  CONFIG
+#  WATCHLIST  — prices & thresholds as of March 5, 2026
+#  alert_below = -5% of price at time of setup
+#  Update these periodically to track current levels
 # ─────────────────────────────────────────────
 
-TICKER       = "META"
-ALERT_BELOW  = 690.00
-LOG_FILE     = "meta_price_log.csv"   # Set to None to disable
+WATCHLIST = [
+    {"ticker": "META",  "name": "Meta Platforms",    "alert_below": 634.58, "news_query": "META Facebook stock"},
+    {"ticker": "GOOGL", "name": "Alphabet (Google)",  "alert_below": 287.97, "news_query": "Alphabet Google stock"},
+    {"ticker": "MSFT",  "name": "Microsoft",          "alert_below": 384.94, "news_query": "Microsoft MSFT stock"},
+    {"ticker": "AAPL",  "name": "Apple",              "alert_below": 249.39, "news_query": "Apple AAPL stock"},
+    {"ticker": "NVDA",  "name": "Nvidia",             "alert_below": 173.89, "news_query": "Nvidia NVDA stock"},
+    {"ticker": "AMZN",  "name": "Amazon",             "alert_below": 205.98, "news_query": "Amazon AMZN stock"},
+]
+
+LOG_FILE = "stock_price_log.csv"   # Set to None to disable
 
 # --- Credentials (Railway environment variables) ---
 EMAIL_SENDER      = os.environ.get("EMAIL_SENDER",      "you@gmail.com")
@@ -50,7 +59,7 @@ def get_price(ticker: str) -> Optional[float]:
         price = stock.fast_info.last_price
         return round(price, 2)
     except Exception as e:
-        print(f"[ERROR] Could not fetch price: {e}")
+        print(f"  [ERROR] Could not fetch price for {ticker}: {e}")
         return None
 
 
@@ -69,7 +78,7 @@ def get_news(query: str, num_articles: int = 5) -> list:
         data = response.json()
 
         if data.get("status") != "ok":
-            print(f"[WARN] NewsAPI error: {data.get('message')}")
+            print(f"  [WARN] NewsAPI error: {data.get('message')}")
             return []
 
         return [
@@ -84,12 +93,12 @@ def get_news(query: str, num_articles: int = 5) -> list:
         ]
 
     except Exception as e:
-        print(f"[ERROR] Could not fetch news: {e}")
+        print(f"  [ERROR] Could not fetch news: {e}")
         return []
 
 
-def analyze_with_claude(price: float, target: float, articles: list) -> str:
-    """Ask Claude to reason about the price drop and news."""
+def analyze_with_claude(ticker: str, name: str, price: float, target: float, articles: list) -> str:
+    """Ask Claude to analyze the price drop in context of recent news."""
     try:
         client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 
@@ -98,14 +107,14 @@ def analyze_with_claude(price: float, target: float, articles: list) -> str:
             for a in articles
         ]) if articles else "No recent news articles found."
 
-        prompt = f"""You are a financial analyst assistant. META's stock price has dropped below a user's alert threshold.
+        prompt = f"""You are a financial analyst assistant. {name} ({ticker}) stock has dropped below a user's alert threshold.
 
 Price data:
 - Current price: ${price:.2f}
 - Alert threshold: ${target:.2f}
 - Drop: ${target - price:.2f} ({((target - price) / target * 100):.2f}%)
 
-Recent META news:
+Recent {name} news:
 {news_text}
 
 Provide a brief analysis (3-5 sentences):
@@ -123,11 +132,11 @@ Be direct and practical. No explicit buy/sell advice."""
         return message.content[0].text
 
     except Exception as e:
-        print(f"[ERROR] Claude analysis failed: {e}")
+        print(f"  [ERROR] Claude analysis failed: {e}")
         return "AI analysis unavailable at this time."
 
 
-def build_html_email(price: float, target: float, analysis: str, articles: list) -> tuple[str, str]:
+def build_html_email(ticker: str, name: str, price: float, target: float, analysis: str, articles: list) -> tuple[str, str]:
     """Build subject line and HTML body for the alert email."""
     timestamp = datetime.now().strftime("%b %d, %Y · %H:%M")
     drop_usd  = target - price
@@ -151,7 +160,7 @@ def build_html_email(price: float, target: float, analysis: str, articles: list)
         for p in analysis.split("\n") if p.strip()
     )
 
-    subject = f"🔴 META ${price:.2f} — dropped ${drop_usd:.2f} below your alert"
+    subject = f"🔴 {ticker} ${price:.2f} — dropped ${drop_usd:.2f} below your alert"
 
     html = f"""<!DOCTYPE html>
 <html>
@@ -165,8 +174,8 @@ def build_html_email(price: float, target: float, analysis: str, articles: list)
           <!-- Header -->
           <tr>
             <td style="background:#1877f2; padding:24px 32px;">
-              <div style="color:#fff; font-size:11px; font-weight:700; letter-spacing:1.2px; text-transform:uppercase; opacity:0.8;">Stock Alert</div>
-              <div style="color:#fff; font-size:26px; font-weight:700; margin-top:4px;">META Platforms</div>
+              <div style="color:#fff; font-size:11px; font-weight:700; letter-spacing:1.2px; text-transform:uppercase; opacity:0.8;">Stock Alert · {ticker}</div>
+              <div style="color:#fff; font-size:26px; font-weight:700; margin-top:4px;">{name}</div>
               <div style="color:rgba(255,255,255,0.75); font-size:13px; margin-top:2px;">{timestamp}</div>
             </td>
           </tr>
@@ -222,9 +231,9 @@ def build_html_email(price: float, target: float, analysis: str, articles: list)
     return subject, html
 
 
-def send_smart_email(price: float, target: float, analysis: str, articles: list) -> bool:
+def send_smart_email(ticker: str, name: str, price: float, target: float, analysis: str, articles: list) -> bool:
     """Send HTML alert email via SendGrid."""
-    subject, html_body = build_html_email(price, target, analysis, articles)
+    subject, html_body = build_html_email(ticker, name, price, target, analysis, articles)
 
     try:
         response = requests.post(
@@ -243,18 +252,18 @@ def send_smart_email(price: float, target: float, analysis: str, articles: list)
         )
 
         if response.status_code == 202:
-            print(f"📧 Alert email sent to {EMAIL_RECEIVER}")
+            print(f"  📧 Alert email sent to {EMAIL_RECEIVER}")
             return True
         else:
-            print(f"[ERROR] SendGrid error {response.status_code}: {response.text}")
+            print(f"  [ERROR] SendGrid error {response.status_code}: {response.text}")
             return False
 
     except Exception as e:
-        print(f"[ERROR] Failed to send email: {e}")
+        print(f"  [ERROR] Failed to send email: {e}")
         return False
 
 
-def log_price(price: float):
+def log_price(ticker: str, price: float, alert_below: float):
     """Append price to CSV log file."""
     if not LOG_FILE:
         return
@@ -262,41 +271,52 @@ def log_price(price: float):
     file_exists = os.path.isfile(LOG_FILE)
     with open(LOG_FILE, "a") as f:
         if not file_exists:
-            f.write("timestamp,ticker,price,below_target\n")
-        below = "YES" if price < ALERT_BELOW else ""
-        f.write(f"{timestamp},{TICKER},{price},{below}\n")
+            f.write("timestamp,ticker,price,alert_below,triggered\n")
+        triggered = "YES" if price < alert_below else ""
+        f.write(f"{timestamp},{ticker},{price},{alert_below},{triggered}\n")
 
 
 def main():
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    print(f"[{timestamp}] META Price Tracker — starting run")
+    print(f"[{timestamp}] Stock Price Tracker — starting run ({len(WATCHLIST)} stocks)")
+    print("─" * 54)
 
-    price = get_price(TICKER)
+    triggered_count = 0
 
-    if price is None:
-        print("[ERROR] Could not retrieve price. Exiting.")
-        sys.exit(1)
+    for stock in WATCHLIST:
+        ticker      = stock["ticker"]
+        name        = stock["name"]
+        alert_below = stock["alert_below"]
+        news_query  = stock["news_query"]
 
-    status = "🔴 BELOW TARGET" if price < ALERT_BELOW else "✅ above target"
-    print(f"[{timestamp}] {TICKER}: ${price:.2f}  —  {status}")
+        price = get_price(ticker)
 
-    log_price(price)
+        if price is None:
+            print(f"  {ticker}: ⚠️  Could not retrieve price, skipping.")
+            continue
 
-    if price < ALERT_BELOW:
-        print("⚠️  Triggered! Fetching news and running AI analysis...")
+        status = "🔴 BELOW TARGET" if price < alert_below else "✅ above target"
+        print(f"  {ticker}: ${price:.2f}  (alert: ${alert_below:.2f})  —  {status}")
 
-        articles = get_news("META Facebook stock")
-        print(f"📰 Found {len(articles)} news articles")
+        log_price(ticker, price, alert_below)
 
-        print("🤖 Asking Claude for analysis...")
-        analysis = analyze_with_claude(price, ALERT_BELOW, articles)
-        print("✅ Analysis complete")
+        if price < alert_below:
+            triggered_count += 1
+            print(f"  ⚠️  Triggered! Fetching news and running AI analysis...")
 
-        send_smart_email(price, ALERT_BELOW, analysis, articles)
-    else:
-        print("✅ Price above target — no alert needed.")
+            articles = get_news(news_query)
+            print(f"  📰 Found {len(articles)} news articles")
 
-    print("Run complete. Exiting.")
+            print(f"  🤖 Asking Claude for analysis...")
+            analysis = analyze_with_claude(ticker, name, price, alert_below, articles)
+            print(f"  ✅ Analysis complete")
+
+            send_smart_email(ticker, name, price, alert_below, analysis, articles)
+
+        print()
+
+    print("─" * 54)
+    print(f"Run complete. {triggered_count}/{len(WATCHLIST)} alerts triggered. Exiting.")
 
 
 if __name__ == "__main__":
