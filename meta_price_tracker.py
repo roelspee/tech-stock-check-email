@@ -40,8 +40,8 @@ WATCHLIST = [
     {"ticker": "AMZN",  "name": "Amazon",             "news_query": "Amazon AMZN stock"},
 ]
 
-ALERT_DROP_PCT = 0.01   # Alert when price is 5% below 60-day high
-ROLLING_DAYS   = 30     # Lookback window for the high
+ALERT_DROP_PCT = 0.05   # Alert when price is 5% below 60-day high
+ROLLING_DAYS   = 60     # Lookback window for the high
 
 LOG_FILE = "stock_price_log.csv"   # Set to None to disable
 
