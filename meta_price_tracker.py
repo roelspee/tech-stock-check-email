@@ -32,12 +32,12 @@ from typing import Optional
 # ─────────────────────────────────────────────
 
 WATCHLIST = [
-    {"ticker": "META",  "name": "Meta Platforms",    "alert_below": 634.58, "news_query": "META Facebook stock"},
-    {"ticker": "GOOGL", "name": "Alphabet (Google)",  "alert_below": 287.97, "news_query": "Alphabet Google stock"},
-    {"ticker": "MSFT",  "name": "Microsoft",          "alert_below": 384.94, "news_query": "Microsoft MSFT stock"},
-    {"ticker": "AAPL",  "name": "Apple",              "alert_below": 249.39, "news_query": "Apple AAPL stock"},
-    {"ticker": "NVDA",  "name": "Nvidia",             "alert_below": 173.89, "news_query": "Nvidia NVDA stock"},
-    {"ticker": "AMZN",  "name": "Amazon",             "alert_below": 205.98, "news_query": "Amazon AMZN stock"},
+    {"ticker": "META",  "name": "Meta Platforms",    "alert_below": 734.58, "news_query": "META Facebook stock"},
+    {"ticker": "GOOGL", "name": "Alphabet (Google)",  "alert_below": 387.97, "news_query": "Alphabet Google stock"},
+    {"ticker": "MSFT",  "name": "Microsoft",          "alert_below": 484.94, "news_query": "Microsoft MSFT stock"},
+    {"ticker": "AAPL",  "name": "Apple",              "alert_below": 349.39, "news_query": "Apple AAPL stock"},
+    {"ticker": "NVDA",  "name": "Nvidia",             "alert_below": 273.89, "news_query": "Nvidia NVDA stock"},
+    {"ticker": "AMZN",  "name": "Amazon",             "alert_below": 305.98, "news_query": "Amazon AMZN stock"},
 ]
 
 LOG_FILE = "stock_price_log.csv"   # Set to None to disable
