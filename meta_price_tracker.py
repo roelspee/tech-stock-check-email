@@ -41,7 +41,7 @@ WATCHLIST = [
 ]
 
 ALERT_DROP_PCT = 0.05   # Alert when price is 5% below 60-day high
-ROLLING_DAYS   = 60     # Lookback window for the high
+ROLLING_DAYS   = 30     # Lookback window for the high
 
 LOG_FILE = "stock_price_log.csv"   # Set to None to disable
 
